@@ -1,0 +1,14 @@
+{
+  "name": "hedwig",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs test-ai/*.test.mjs",
+    "test:bridge": "node --test test/*.test.mjs",
+    "test:ai": "node --test test-ai/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=26"
+  }
+}

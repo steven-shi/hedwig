@@ -1,0 +1,10 @@
+**
+!Dockerfile
+!tools/
+!tools/prepare_groups.py
+!neo-overlay/
+!neo-overlay/**
+!bridge/
+!bridge/**
+!ai/
+!ai/**

@@ -1,0 +1,8 @@
+{
+  "endpoint": "https://api.deepseek.com",
+  "apiKey": "replace-with-your-api-key",
+  "model": "deepseek-flash",
+  "adminWechatId": "",
+  "groupsEnabled": false,
+  "promptFile": "prompts/hedwig-v2.txt"
+}

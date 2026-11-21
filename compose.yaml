@@ -1,0 +1,49 @@
+name: hedwig
+services:
+  ai:
+    image: hedwig-ai:local
+    build:
+      context: .
+      target: ai
+    user: "${HEDWIG_UID:-1000}:${HEDWIG_GID:-1000}"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: ./config.json
+        target: /config/config.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - ./prompts:/app/prompts:ro
+      - ./run:/run/neo
+    healthcheck:
+      test: ["CMD", "node", "ai/health.mjs"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+    stop_grace_period: 10s
+  bridge:
+    image: hedwig-bridge:local
+    platform: linux/arm64
+    build:
+      context: .
+      target: bridge
+    depends_on:
+      ai:
+        condition: service_healthy
+    user: "${HEDWIG_UID:-1000}:${HEDWIG_GID:-1000}"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    restart: "no"
+    volumes:
+      - ./run:/run/neo
+      - ./state:/state
+    stop_grace_period: 30s
