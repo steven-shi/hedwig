@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { eventLogger } from '../bridge/log.mjs';
 import net from 'node:net';
 import { lstatSync, unlinkSync, chmodSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -22,11 +23,14 @@ async function prepare(path) {
 }
 export function validRequest(b) {
   const id = value => typeof value === 'string' && value.length > 0 && value.length <= 512;
+  const validQuote = value => value === undefined || (typeof value === 'string' && !!value.trim() && value.length <= 2000);
   if (!b || b.version !== 1 || !id(b.requestId) || !Number.isFinite(b.deadlineAt) ||
       b.deadlineAt >= Date.now() + 300000 || !id(b.conversation?.id) ||
       !id(b.actor?.id) ||
       !id(b.message?.id) || !Number.isFinite(b.message.timestamp) ||
       typeof b.message.text !== 'string' || !b.message.text.trim() || b.message.text.length > 16000 ||
+      !validQuote(b.message.quotedText) ||
+      (b.message.videoUnavailable !== undefined && (b.message.videoUnavailable !== true || b.message.image !== undefined)) ||
       (b.message.image !== undefined && !validImage(b.message.image))) return false;
   if (b.conversation.kind === 'private') return b.actor.id === b.conversation.id && !b.conversation.id.endsWith('@chatroom');
   if (b.conversation.kind !== 'group' || !b.conversation.id.endsWith('@chatroom') || b.actor.isAdmin === true ||
@@ -35,7 +39,8 @@ export function validRequest(b) {
       !Array.isArray(b.context.messages) || b.context.messages.length > 30 || JSON.stringify(b.context.messages).length > 12000) return false;
   if (!b.context.messages.every(m => m && id(m.id) && id(m.senderId) &&
     typeof m.senderName === 'string' && m.senderName.length <= 128 &&
-    typeof m.text === 'string' && m.text.length <= 2000 && Number.isFinite(m.timestamp))) return false;
+    typeof m.text === 'string' && m.text.length <= 2000 && validQuote(m.quotedText) &&
+    (m.video === undefined || m.video === true) && Number.isFinite(m.timestamp))) return false;
   const trigger = b.context.trigger ?? 'mention';
   if (trigger === 'followup') {
     return !b.message.mentions.includes(b.context.botId);
@@ -87,7 +92,7 @@ export async function startServer({ service, socketPath }) {
   };
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const log = data => console.info(JSON.stringify({ time: new Date().toISOString(), ...data }));
+  const log = eventLogger('ai');
   let config;
   try { config = loadConfig(process.env.HEDWIG_CONFIG_FILE ?? '/config/config.json'); }
   catch (error) { console.error(error.message); process.exit(1); }

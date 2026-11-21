@@ -30,7 +30,7 @@ native = replace(native,'    time::{Duration, SystemTime, UNIX_EPOCH},','    tim
 native = replace(native,'    received_cursor: Vec<u8>,','    received_cursor: Vec<u8>,\n    rooms: HashMap<String, groups::RoomView>,\n    room_failures: HashMap<String, Instant>,\n    group_live_since: u32,')
 native = replace(native,'    group_live_since: u32,','    group_live_since: u32,\n    pending_images: std::collections::VecDeque<(String, Instant, wechat_protocol::media::MediaDescriptor)>,')
 native = replace(native,'    timestamp: u32,','    timestamp: u32,\n    #[serde(skip_serializing_if = "Option::is_none")]\n    room_id: Option<String>,\n    mentions: Vec<String>,\n    #[serde(skip_serializing_if = "Option::is_none")]\n    sender_name: Option<String>,')
-native = replace(native,'    sender_name: Option<String>,','    sender_name: Option<String>,\n    image: bool,\n    #[serde(skip)]\n    descriptor: Option<wechat_protocol::media::MediaDescriptor>,')
+native = replace(native,'    sender_name: Option<String>,','    sender_name: Option<String>,\n    image: bool,\n    video: bool,\n    #[serde(skip_serializing_if = "Option::is_none")]\n    quoted_text: Option<String>,\n    #[serde(skip)]\n    descriptor: Option<wechat_protocol::media::MediaDescriptor>,')
 native = replace(native,'    LookupSelf,','    DownloadImage { id: String },\n    LookupSelf,')
 native = replace(native,'    pub fn lookup_self(&self) -> AsyncTask<NeoTask> {','    pub fn download_image(&self, id: String) -> AsyncTask<NeoTask> {\n        self.task(Operation::DownloadImage { id })\n    }\n\n    #[napi]\n    pub fn lookup_self(&self) -> AsyncTask<NeoTask> {')
 native = replace(native,'            Operation::LookupSelf =>','            Operation::DownloadImage { .. } => "download an image",\n            Operation::LookupSelf =>')
@@ -99,9 +99,9 @@ fn text_messages(session: &mut Session, commands: Vec<wire::SyncCommand>, userna
     for command in commands {
         if command.id != 5 { continue; }
         let Ok(message) = wire::decode_add_message(&command.payload, username) else { continue; };
-        if !matches!(message.message_type, 1 | 3) || message.outgoing { continue; }
+        if !matches!(message.message_type, 1 | 3 | 43 | 49 | 62) || message.outgoing { continue; }
         let is_group = message.peer.ends_with("@chatroom");
-        if (is_group || message.message_type == 3) && message.created_at < session.group_live_since { continue; }
+        if (is_group || message.message_type != 1) && message.created_at < session.group_live_since { continue; }
         if is_group && !ensure_room(session, &message.peer, username) { dropped += 1; continue; }
         let room = if is_group { session.rooms.get(&message.peer) } else { None };
         if let Some(mut projected) = groups::project(message, username, room) {
@@ -119,7 +119,7 @@ fn text_messages(session: &mut Session, commands: Vec<wire::SyncCommand>, userna
 native = replace(native,'        let messages = text_messages(\n            vec![','        let (messages, _) = text_messages(\n            &mut Session::default(),\n            vec![')
 
 interface = original('src/native.ts')
-interface = replace(interface,'  timestamp: number\n}','  timestamp: number\n  roomId?: string\n  mentions?: string[]\n  senderName?: string\n  image?: boolean\n}')
+interface = replace(interface,'  timestamp: number\n}','  timestamp: number\n  roomId?: string\n  mentions?: string[]\n  senderName?: string\n  image?: boolean\n  video?: boolean\n  quotedText?: string\n}')
 interface = replace(interface,'  lookupSelf(): Promise<SelfProfile>','  downloadImage?(id: string): Promise<{ mimeType: string, base64: string }>\n  lookupSelf(): Promise<SelfProfile>')
 interface = replace(interface,'(...args: Parameters<Session[K]>) => Promise<string>','(...args: Parameters<NonNullable<Session[K]>>) => Promise<string>')
 interface = replace(interface,'    lookupSelf: async () =>','    downloadImage: async id => JSON.parse(await addon.downloadImage!(id)),\n    lookupSelf: async () =>')
@@ -150,9 +150,10 @@ puppet = replace(puppet,'        putRecent(this.messages, item.id, {\n          
           this.rooms.add(item.roomId)
           if (this.rooms.size > CACHE_LIMIT) this.rooms.delete(this.rooms.values().next().value!)
         }
-        const payload: payloads.Message & { neoSenderName?: string } = {
+        const payload: payloads.Message & { neoSenderName?: string, neoQuotedText?: string } = {
           id: item.id, talkerId: item.from, listenerId: item.to,
-          text: item.text, timestamp: item.timestamp, type: item.image ? types.Message.Image : types.Message.Text,
+          text: item.text, timestamp: item.timestamp, type: item.image ? types.Message.Image : item.video ? types.Message.Video : types.Message.Text,
+          ...(item.quotedText === undefined ? {} : { neoQuotedText: item.quotedText }),
           ...(item.roomId ? { roomId: item.roomId, mentionIdList: item.mentions ?? [], neoSenderName: item.senderName } : {}),
         }
         putRecent(this.messages, item.id, payload)''')

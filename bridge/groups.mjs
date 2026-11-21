@@ -13,6 +13,16 @@ export function precedingPhoto(messages, senderId, receivedAt) {
   const age = receivedAt - previous.timestamp * 1000;
   return age >= 0 && age <= 60_000 ? previous.id : undefined;
 }
+export function asksAboutVideo(text, messages, senderId, receivedAt) {
+  const question = withoutMentions(text);
+  if (/(?:看|播放|识别|分析|总结|描述).{0,8}(?:视频|影片|短片)|(?:视频|影片|短片)(?:里|中)|(?:watch|play|analyse|analyze|describe|summari[sz]e).{0,20}\b(?:video|clip)\b|\bin (?:this|the) (?:video|clip)\b/iu.test(question)) return true;
+  const previous = messages.findLast(entry => entry.senderId === senderId);
+  if (previous?.video !== true) return false;
+  const age = receivedAt - previous.timestamp * 1000;
+  return age >= 0 && age <= 120_000 && (
+    !question || /谁.{0,5}(?:跳舞|唱歌)|(?:在|干|做)什么|看看|看一下|who.{0,20}(?:danc|sing)|take a look/iu.test(question)
+  );
+}
 const PARTICIPATION_MS = 10 * 60 * 1000;
 export class GroupBuffer {
   constructor({ now = Date.now, rooms = 100, messages = 50, chars = 12000, ageMs = 1800000 } = {}) {
@@ -33,6 +43,8 @@ export class GroupBuffer {
       senderName: cleanLabel(message.senderName || message.senderId), text: message.text.slice(0, 2000),
       timestamp: message.timestamp,
       ...(message.kind === 'image' ? { image: true } : {}),
+      ...(message.kind === 'video' ? { video: true } : {}),
+      ...(message.quotedText ? { quotedText: message.quotedText } : {}),
     };
     const previous = this.rooms.get(roomId);
     const entries = (previous?.entries ?? []).filter(e => e.timestamp * 1000 >= now - this.ageMs);

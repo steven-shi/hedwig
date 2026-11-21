@@ -12,6 +12,13 @@ services:
     security_opt: ["no-new-privileges:true"]
     pids_limit: 128
     restart: unless-stopped
+    environment:
+      HEDWIG_LOG_DIR: /logs
+    logging: &hedwig_logging
+      driver: local
+      options:
+        max-size: "2m"
+        max-file: "3"
     volumes:
       - type: bind
         source: ./config.json
@@ -20,6 +27,7 @@ services:
         bind:
           create_host_path: false
       - ./prompts:/app/prompts:ro
+      - ./logs:/logs
       - ./run:/run/neo
     healthcheck:
       test: ["CMD", "node", "ai/health.mjs"]
@@ -43,7 +51,12 @@ services:
     security_opt: ["no-new-privileges:true"]
     pids_limit: 128
     restart: "no"
+    environment:
+      HEDWIG_LOG_DIR: /logs
+    logging: *hedwig_logging
     volumes:
       - ./run:/run/neo
       - ./state:/state
+      - ./local:/app/local:ro
+      - ./logs:/logs
     stop_grace_period: 30s

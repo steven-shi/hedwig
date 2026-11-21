@@ -30,5 +30,5 @@ CMD ["node", "bridge/main.mjs"]
 
 FROM runtime AS ai
 COPY ai ./ai
-COPY bridge/images.mjs bridge/errors.mjs ./bridge/
+COPY bridge/images.mjs bridge/errors.mjs bridge/log.mjs ./bridge/
 CMD ["node", "ai/server.mjs"]

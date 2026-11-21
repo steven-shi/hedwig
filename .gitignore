@@ -27,3 +27,6 @@ target/
 .codex/
 
 /config.json
+/local/
+/logs/
+/prompts/local-hedwig.txt

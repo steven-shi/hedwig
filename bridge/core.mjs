@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { BridgeError, describe } from './errors.mjs';
-import { GroupBuffer, cleanLabel, hasFollowupContent, hasQuestion, precedingPhoto } from './groups.mjs';
+import { GroupBuffer, asksAboutVideo, cleanLabel, hasFollowupContent, hasQuestion, precedingPhoto } from './groups.mjs';
 import { validImage } from './images.mjs';
 
 const UNAVAILABLE = 'AI 暂时不可用，请稍后再试。';
@@ -54,11 +54,13 @@ export class Bridge {
   async accept(message) {
     const group = !!message.roomId;
     const image = message.kind === 'image' && typeof this.loadImage === 'function';
+    const video = message.kind === 'video';
     let imageId = image ? message.id : undefined;
-    if (this.liveSince === null || (message.kind !== 'text' && !image) ||
+    if (this.liveSince === null || (message.kind !== 'text' && !image && !video) ||
         (group && (!this.groupsEnabled || typeof message.roomId !== 'string' || !message.roomId.endsWith('@chatroom'))) ||
         message.senderId === message.selfId || !message.senderId || !message.id) return 'ignored';
     if (image) message = { ...message, text: '[图片]' };
+    if (video) message = { ...message, text: '[视频，内容不可读取]' };
     if (typeof message.text !== 'string' || !message.text.trim()) return 'ignored';
     if (!Number.isFinite(message.timestamp) || message.timestamp < this.liveSince) return 'history';
     const identify = message.kind === 'text' && /^!identify\s+(\S+)$/i.exec(message.text.trim());
@@ -67,6 +69,7 @@ export class Bridge {
     const receivedAt = group ? this.groupBuffer.now() : Date.now();
     const options = group ? { mentions: [message.senderId], label: message.senderName || message.senderId, groupEpoch: this.groupEpoch } : {};
     let groupContext;
+    let videoUnavailable = video;
     if (group) {
       if (/^🤫[\uFE0E\uFE0F]?$/u.test(message.text.trim())) {
         if (!this.state.claim(JSON.stringify([route, message.senderId]), message.id)) return 'duplicate';
@@ -77,11 +80,13 @@ export class Bridge {
       if (!message.selfId) return 'buffered';
       const mentions = message.mentions ?? [];
       const explicit = mentions.includes(message.selfId);
-      if (!explicit && (!this.groupBuffer.isActive(route, receivedAt) || (!image && !hasFollowupContent(message.text)))) return 'buffered';
+      if (!explicit && (video || !this.groupBuffer.isActive(route, receivedAt) ||
+          (!image && !message.quotedText && !hasFollowupContent(message.text)))) return 'buffered';
       const messages = this.groupBuffer.snapshot(route, message.id);
       if (!this.state.claim(JSON.stringify([route, message.senderId]), message.id)) return 'duplicate';
-      const trigger = explicit ? (hasQuestion(message.text) ? 'mention' : 'invite') : 'followup';
-      if (explicit && !image && typeof this.loadImage === 'function') {
+      if (!image && !message.quotedText) videoUnavailable ||= asksAboutVideo(message.text, messages, message.senderId, receivedAt);
+      const trigger = explicit ? (hasQuestion(message.text) || message.quotedText || videoUnavailable ? 'mention' : 'invite') : 'followup';
+      if (explicit && !image && !message.quotedText && !videoUnavailable && typeof this.loadImage === 'function') {
         imageId = precedingPhoto(messages, message.senderId, receivedAt);
       }
       groupContext = { botId: message.selfId, messages, trigger };
@@ -94,13 +99,16 @@ export class Bridge {
         return 'identity';
       }
     }
+    if (!group && !image && !message.quotedText && !message.text.trimStart().startsWith('!')) {
+      videoUnavailable ||= asksAboutVideo(message.text, [], message.senderId, receivedAt);
+    }
     if (message.text.length > 16000) { await this.failure(route, new BridgeError('INPUT_TOO_LONG', '输入超过桥接文字长度限制'), options); return 'rejected'; }
     if (this.pending >= this.maxPending || (this.counts.get(route) ?? 0) >= this.maxPerPeer) {
       await this.failure(route, new BridgeError('AI_BUSY', 'AI 请求队列已满'), options); return 'busy';
     }
     if (group && !options.silentFailure) this.groupBuffer.activate(route, receivedAt);
     return new Promise(resolve => {
-      const job = { message, route, options, groupContext, imageId, receivedAt, deadlineAt: Date.now() + this.ttlMs, resolve };
+      const job = { message, route, options, groupContext, imageId, videoUnavailable, receivedAt, deadlineAt: Date.now() + this.ttlMs, resolve };
       if (!this.queues.has(route)) this.queues.set(route, []);
       this.queues.get(route).push(job); this.pending++;
       this.counts.set(route, (this.counts.get(route) ?? 0) + 1); this.pump();
@@ -135,6 +143,8 @@ export class Bridge {
       conversation: { kind: group ? 'group' : 'private', id: job.route },
       actor: { id: message.senderId },
       message: { id: message.id, text: message.text, timestamp: message.timestamp,
+        ...(message.quotedText ? { quotedText: message.quotedText } : {}),
+        ...(job.videoUnavailable ? { videoUnavailable: true } : {}),
         ...(group ? { mentions: message.mentions ?? [], senderName: cleanLabel(message.senderName || message.senderId) } : {}) },
       ...(group ? { context: job.groupContext } : {}),
     };

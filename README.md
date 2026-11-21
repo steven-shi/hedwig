@@ -7,6 +7,8 @@
 > [!WARNING]
 > **请勿使用微信主账号登录。** Hedwig 通过第三方方式接入个人微信，微信可能将其判定为使用外挂或非官方工具，导致功能受限、限制登录或封号。请仅使用专门的测试账号，测试账号同样有风险。参见[《微信个人账号使用规范》存档](https://archive.is/hRlZ4)。
 
+支持私聊和群聊中的文字引用，群聊沿用原本的 @ 和接话规则。视频内容无法读取，问及视频时会说明限制，并可建议发送截图。
+
 ## 群聊读图示例
 
 小禾先发一道松果减法题的图片，再 @Hedwig 要提示。Hedwig 引导小禾从 12 往回数 5 步，然后确认孩子自己算出的答案。图中人物和对话均为演示示例。
@@ -26,8 +28,8 @@ git clone https://github.com/steven-shi/hedwig.git
 cd hedwig
 cp config.example.json config.json
 chmod 600 config.json
-mkdir -p run state
-chmod 700 run state
+mkdir -p run state local logs
+chmod 700 run state local logs
 printf 'HEDWIG_UID=%s\nHEDWIG_GID=%s\n' "$(id -u)" "$(id -g)" > .env
 ```
 
@@ -63,6 +65,22 @@ docker compose exec -T bridge node bridge/admin.mjs id
 - 修改 Endpoint、API Key、模型、管理员或 Prompt 后，运行 `docker compose up -d --no-deps --force-recreate ai`。微信桥接可以保持在线，AI 内存里的对话历史会清空。
 - 要开启或关闭群聊，修改 `groupsEnabled`，重载 AI 后运行 `docker compose restart bridge` 并扫码。群内真实 @ 开启接话窗口，单发 🤫 关闭。
 - 请在自己的终端查看二维码和管理员内部 ID。真实的 `config.json`、扫码文件和运行状态都属于本地数据。
+
+### 微信掉线脚本（可选）
+
+在部署目录创建 `local/bridge.json`，设置要调用的本地脚本文件名：
+
+```json
+{"alertScript": "alert.mjs"}
+```
+
+把脚本放在 `local/alert.mjs`，赋予执行权限，并让它使用桥接容器中已有的解释器。Compose 会将这个目录只读挂入桥接，Git 会忽略它。
+
+微信登出时，桥接会读取该配置，把 `wechat_logout` 和 UTC 时间作为两个参数传给脚本。脚本应在 12 秒内完成。配置文件或字段缺失时跳过。升级旧部署前先创建 `local/`，然后重新创建桥接并扫码。挂载就绪后，配置文件和脚本可直接在本地更新。
+
+### 日志
+
+在 `./logs/` 查看桥接和 AI 的结构化事件。每个服务保留当前日志和上一份轮转日志，单份约 1 MiB。Docker 也会轮转 `docker compose logs` 的输出。升级现有部署前以部署用户创建 `./logs/` 并设为 0700。
 
 ## 家长需要知道的边界
 

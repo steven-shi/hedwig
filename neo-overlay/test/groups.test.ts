@@ -21,10 +21,13 @@ test('group text keeps room, actual sender and native mentions; room send passes
           synced = true
           return { continuation: false, messages: [{
             id: 'group-msg', from: 'alice', to: 'bot', text: '@Bot hi', timestamp: 1700000000,
-            roomId: 'room@chatroom', mentions: ['bot'], senderName: 'Alice',
+            roomId: 'room@chatroom', mentions: ['bot'], senderName: 'Alice', quotedText: 'original fixture',
           }, {
             id: 'group-image', from: 'alice', to: 'bot', text: '', timestamp: 1700000000,
             roomId: 'room@chatroom', mentions: [], senderName: 'Alice', image: true,
+          }, {
+            id: 'group-video', from: 'alice', to: 'bot', text: '', timestamp: 1700000000,
+            roomId: 'room@chatroom', mentions: [], senderName: 'Alice', video: true,
           }] }
         },
         async sendText(destination, text, mentions) { sends.push([destination, text, mentions]); return { status: 'accepted' } },
@@ -44,15 +47,17 @@ test('group text keeps room, actual sender and native mentions; room send passes
   await puppet.start()
   try {
     const deadline = Date.now() + 5000
-    while (ids.length < 2 && Date.now() < deadline) await delay(10)
-    assert.deepEqual(ids, ['group-msg', 'group-image'])
+    while (ids.length < 3 && Date.now() < deadline) await delay(10)
+    assert.deepEqual(ids, ['group-msg', 'group-image', 'group-video'])
     const message = await puppet.messagePayload(ids[0]!)
     assert.equal(message.type, types.Message.Text)
     assert.equal(message.talkerId, 'alice'); assert.equal(message.roomId, 'room@chatroom')
     assert.deepEqual('mentionIdList' in message ? message.mentionIdList : undefined, ['bot'])
+    assert.equal('neoQuotedText' in message ? message.neoQuotedText : undefined, 'original fixture')
     const image = await puppet.messagePayload(ids[1]!)
     assert.equal(image.type, types.Message.Image)
     assert.equal(image.roomId, 'room@chatroom')
+    assert.equal((await puppet.messagePayload(ids[2]!)).type, types.Message.Video)
     assert.deepEqual(await puppet.downloadImage(ids[1]!), { mimeType: 'image/png', base64: 'fixture-bytes' })
     await assert.rejects(puppet.downloadImage(ids[0]!), /unavailable/)
     await puppet.messageSendText('room@chatroom', '@Alice\u2005hello', ['alice'])

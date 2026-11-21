@@ -6,12 +6,39 @@ use std::collections::HashMap;
 use std::time::Instant;
 use wechat_protocol::wire;
 
-fn message_content(kind: i32, text: &str) -> Option<(String, Option<wechat_protocol::media::MediaDescriptor>)> {
-    match kind {
-        1 => Some((text.to_owned(), None)),
-        3 => Some((String::new(), Some(super::images::descriptor(text)?))),
-        _ => None,
-    }
+fn xml_child<'a, 'input>(node: roxmltree::Node<'a, 'input>, name: &str) -> Option<roxmltree::Node<'a, 'input>> {
+    let mut matches = node.children().filter(|child| child.has_tag_name(name));
+    let child = matches.next()?;
+    matches.next().is_none().then_some(child)
+}
+
+fn xml_text(node: roxmltree::Node<'_, '_>) -> Option<String> {
+    if node.children().any(|child| child.is_element()) { return None; }
+    let value: String = node.children().filter(|child| child.is_text()).filter_map(|child| child.text()).collect();
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn quote_reply(raw: &str) -> Option<(String, Option<String>)> {
+    if raw.len() > 65_536 { return None; }
+    let options = roxmltree::ParsingOptions { allow_dtd: false, ..Default::default() };
+    let document = roxmltree::Document::parse_with_options(raw, options).ok()?;
+    let root = document.root_element();
+    if !root.has_tag_name("msg") { return None; }
+    let app = xml_child(root, "appmsg")?;
+    if xml_text(xml_child(app, "type")?)? != "57" { return None; }
+    let title = xml_text(xml_child(app, "title")?)?;
+    let quoted = xml_child(app, "refermsg").and_then(|reference| {
+        if xml_text(xml_child(reference, "type")?)? != "1" { return None; }
+        let content = xml_text(xml_child(reference, "content")?)?;
+        // Bound by UTF-16 units consistently with the JavaScript bridge.
+        let mut units = 0;
+        Some(content.chars().take_while(|c| {
+            units += c.len_utf16();
+            units <= 2000
+        }).collect())
+    });
+    Some((title, quoted))
 }
 
 pub(super) struct RoomView {
@@ -73,7 +100,7 @@ pub(super) fn project(message: wire::AddMessage, own: &str, room: Option<&RoomVi
     let id = message.server_message_id?;
     let raw = message.content_text?;
     if message.outgoing { return None; }
-    if message.peer.ends_with("@chatroom") {
+    let (from, to, text, room_id, mentions, sender_name) = if message.peer.ends_with("@chatroom") {
         if message.from != message.peer || message.to != own { return None; }
         let view = room?;
         let (sender, text) = raw.split_once(":\n")?;
@@ -81,20 +108,25 @@ pub(super) fn project(message: wire::AddMessage, own: &str, room: Option<&RoomVi
         let label = view.members.get(sender)?.clone();
         let mentions = parse_mentions(message.msgsource.as_deref()).unwrap_or_default()
             .into_iter().filter(|id| view.members.contains_key(id)).collect();
-        let (text, descriptor) = message_content(message.message_type, text)?;
-        Some(TextMessage {
-            id, from: sender.into(), to: own.into(), text, timestamp: message.created_at,
-            room_id: Some(message.peer), mentions, sender_name: Some(label),
-            image: descriptor.is_some(), descriptor,
-        })
+        (sender.to_owned(), own.to_owned(), text, Some(message.peer), mentions, Some(label))
     } else {
-        let (text, descriptor) = message_content(message.message_type, &raw)?;
-        Some(TextMessage {
-            id, from: message.from, to: message.to, text, timestamp: message.created_at,
-            room_id: None, mentions: vec![], sender_name: None,
-            image: descriptor.is_some(), descriptor,
-        })
+        (message.from, message.to, raw.as_str(), None, vec![], None)
+    };
+    let mut projected = TextMessage {
+        id, from, to, text: String::new(), timestamp: message.created_at,
+        room_id, mentions, sender_name, image: false, video: false, quoted_text: None, descriptor: None,
+    };
+    match message.message_type {
+        1 => projected.text = text.to_owned(),
+        3 => {
+            projected.descriptor = Some(super::images::descriptor(text)?);
+            projected.image = true;
+        }
+        43 | 62 => projected.video = true,
+        49 => (projected.text, projected.quoted_text) = quote_reply(text)?,
+        _ => return None,
     }
+    Some(projected)
 }
 #[cfg(test)]
 mod tests {
@@ -166,6 +198,28 @@ mod tests {
     fn private_text_projection_is_unchanged() {
         let projected = project(message("alice", "hello", None, 1), "bot", None).unwrap();
         assert_eq!(projected.from, "alice"); assert_eq!(projected.text, "hello"); assert!(projected.room_id.is_none());
+    }
+    #[test]
+    fn quote_keeps_current_text_and_reference_separate() {
+        let room = view();
+        let raw = "alice:\n<msg><appmsg><title>@Bot 解一下</title><type>57</type><refermsg><type>1</type><content>8 &lt; 9 &amp; <![CDATA[题目]]></content></refermsg></appmsg></msg>";
+        let source = Some("<msgsource><atuserlist>bot</atuserlist></msgsource>");
+        let quote = project(message("room@chatroom", raw, source, 49), "bot", Some(&room)).unwrap();
+        assert_eq!(quote.text, "@Bot 解一下");
+        assert_eq!(quote.quoted_text.as_deref(), Some("8 < 9 & 题目"));
+        assert_eq!(quote.mentions, ["bot"]);
+    }
+    #[test]
+    fn unrelated_app_messages_and_dtd_are_rejected() {
+        assert!(quote_reply("<msg><appmsg><type>5</type><title>link</title></appmsg></msg>").is_none());
+        assert!(quote_reply("<!DOCTYPE msg [<!ENTITY x SYSTEM 'file:///etc/passwd'>]><msg><appmsg><type>57</type><title>&x;</title></appmsg></msg>").is_none());
+        assert_eq!(quote_reply("<msg><appmsg><type>57</type><title>hello</title><refermsg><type>43</type><content>fixture-video-metadata</content></refermsg></appmsg></msg>"), Some(("hello".into(), None)));
+    }
+    #[test]
+    fn video_projection_excludes_raw_payload() {
+        let video = project(message("alice", "fixture-video-metadata", None, 43), "bot", None).unwrap();
+        assert!(video.video && !video.image && video.descriptor.is_none());
+        assert!(!serde_json::to_string(&video).unwrap().contains("fixture-video-metadata"));
     }
 }
 

@@ -18,6 +18,9 @@ test('group mentions use UDS, context uses temporary participant labels', async 
     provider: { chat: async args => {
       calls.push(args);
       const question = args.messages.at(-1).content.startsWith('{') ? JSON.parse(args.messages.at(-1).content).question : '';
+      if (args.messages[0].content.includes('模型没有收到画面、声音或缩略图')) {
+        return '寄一张截图来吧，小巫师。🦉';
+      }
       if (question === '说得也是。') return '{"action":"silent"}';
       if (question === '那我们几点出发？') return '{"action":"reply","text":"会议十点开始，可以按路程留出时间。"}';
       return '十点开会。';
@@ -53,6 +56,23 @@ test('group mentions use UDS, context uses temporary participant labels', async 
   await bridge.accept(group('new question', { mentions: ['bot'] }));
   const newContext = JSON.parse(calls.at(-1).messages.at(-1).content);
   assert(!JSON.stringify(newContext).includes('PRIVATE_ONLY'));
+  const quotedText = '原题是 8 + 7';
+  assert.equal(await bridge.accept(group('@Bot\u2005怎么解？', { mentions: ['bot'], quotedText })), 'sent');
+  const quoted = JSON.parse(calls.at(-1).messages.at(-1).content);
+  assert.equal(quoted.question, '怎么解？');
+  assert.equal(quoted.quotedText, quotedText);
+  assert(!JSON.stringify(quoted).includes('alice'));
+  await bridge.accept(group('再解释一下', { roomId: undefined, quotedText: '!help' }));
+  assert.deepEqual(JSON.parse(calls.at(-1).messages.at(-1).content), { question: '再解释一下', quotedText: '!help' });
+  const beforeVideo = calls.length;
+  assert.equal(await bridge.accept(group('fixture-video-metadata', { kind: 'video' })), 'buffered');
+  assert.equal(calls.length, beforeVideo);
+  assert.equal(await bridge.accept(group('@Bot\u2005谁在跳舞？', { mentions: ['bot'] })), 'sent');
+  assert.match(sent.at(-1).text, /寄一张截图/);
+  assert(calls.at(-1).messages[0].content.startsWith(config.prompt));
+  assert(!JSON.stringify(calls.at(-1)).includes('fixture-video-metadata'));
+  assert.equal(await bridge.accept(group('fixture-video-metadata', { kind: 'video', roomId: undefined })), 'sent');
+  assert.match(sent.at(-1).text, /寄一张截图/);
   await bridge.offline();
 });
 test('group protocol rejects admin privilege claims, missing real mention and excessive context', () => {
@@ -61,6 +81,9 @@ test('group protocol rejects admin privilege claims, missing real mention and ex
     message: { id: 'one', text: 'hi', timestamp: Date.now() / 1000, mentions: ['bot'] },
     context: { botId: 'bot', messages: [] } };
   assert(validRequest(base));
+  assert(validRequest({ ...base, message: { ...base.message, videoUnavailable: true } }));
+  assert(!validRequest({ ...base, message: { ...base.message, videoUnavailable: 'true' } }));
+  assert(!validRequest({ ...base, message: { ...base.message, quotedText: 'x'.repeat(2001) } }));
   assert(!validRequest({ ...base, actor: { id: 'alice', isAdmin: true } }));
   assert(!validRequest({ ...base, message: { ...base.message, mentions: ['bot_suffix'] } }));
   const followup = { ...base, context: { ...base.context, trigger: 'followup' } };

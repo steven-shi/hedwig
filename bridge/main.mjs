@@ -5,6 +5,8 @@ import { types } from 'wechaty-puppet';
 import { Bridge } from './core.mjs';
 import { State } from './state.mjs';
 import { AiClient } from './client.mjs';
+import { eventLogger } from './log.mjs';
+import { runLogoutAlert } from './logout-alert.mjs';
 
 const socketPath = process.env.BRIDGE_SOCKET ?? '/run/neo/ai.sock';
 const directory = process.env.BRIDGE_STATE_DIR ?? '/state';
@@ -16,7 +18,7 @@ const integer = (name, fallback, min, max) => {
   if (!Number.isInteger(value) || value < min || value > max) throw new Error('Invalid setting: ' + name);
   return value;
 };
-const log = data => console.info(JSON.stringify({ time: new Date().toISOString(), ...data }));
+const log = eventLogger('bridge');
 const clearQr = () => { if (qrFile) try { unlinkSync(qrFile); } catch (e) { if (e.code !== 'ENOENT') log({ event: 'qr_cleanup_failed' }); } };
 const writeStatus = status => writeFileSync(statusFile, status, { mode: 0o600 });
 clearQr();
@@ -55,6 +57,7 @@ const bridge = new Bridge({
   maxPerPeer: integer('BRIDGE_MAX_PER_PEER', 5, 1, 100),
 });
 let stopping = false;
+let logoutHandled = false;
 async function shutdown(code) {
   if (stopping) return; stopping = true;
   await bridge.offline(); clearQr(); writeStatus('offline');
@@ -68,8 +71,11 @@ puppet.on('scan', ({ status }) => {
 puppet.on('login', () => { clearQr(); writeStatus('online'); log({ event: 'wechat_login' }); });
 puppet.on('ready', () => { bridge.online(); log({ event: 'wechat_ready', supports: groupsEnabled ? ['private_text', 'group_text', 'group_mentions'] : ['private_text'] }); });
 puppet.on('logout', () => {
+  if (stopping || logoutHandled) return;
+  logoutHandled = true;
   log({ event: 'wechat_logout' });
   void bridge.offline();
+  runLogoutAlert(log);
   setImmediate(() => { void shutdown(1); });
 });
 puppet.on('error', () => {
@@ -81,11 +87,13 @@ puppet.on('message', async ({ messageId }) => {
   if (stopping) return;
   try {
     const message = await puppet.messagePayload(messageId);
-    if (message.type !== types.Message.Text && message.type !== types.Message.Image) return;
+    if (![types.Message.Text, types.Message.Image, types.Message.Video].includes(message.type)) return;
     await bridge.accept({
-      kind: message.type === types.Message.Image ? 'image' : 'text', id: messageId, senderId: message.talkerId,
+      kind: message.type === types.Message.Image ? 'image' : message.type === types.Message.Video ? 'video' : 'text',
+      id: messageId, senderId: message.talkerId,
       selfId: puppet.currentUserId, roomId: message.roomId,
       text: message.text, timestamp: message.timestamp, mentions: message.mentionIdList, senderName: message.neoSenderName,
+      quotedText: message.neoQuotedText,
     });
   } catch { log({ event: 'bridge_receive_failed' }); }
 });
