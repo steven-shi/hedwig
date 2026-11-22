@@ -54,6 +54,8 @@ services:
     environment:
       HEDWIG_LOG_DIR: /logs
     logging: *hedwig_logging
+    ports:
+      - "${HEDWIG_QR_BIND:-127.0.0.1}:${HEDWIG_QR_PORT:-8765}:8765"
     volumes:
       - ./run:/run/neo
       - ./state:/state

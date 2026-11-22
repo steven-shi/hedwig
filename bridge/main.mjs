@@ -1,4 +1,3 @@
-import { writeFileSync, unlinkSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import PuppetNeo from 'wechaty-puppet-neo';
 import { types } from 'wechaty-puppet';
@@ -7,11 +6,12 @@ import { State } from './state.mjs';
 import { AiClient } from './client.mjs';
 import { eventLogger } from './log.mjs';
 import { runLogoutAlert } from './logout-alert.mjs';
+import { loginSession } from './login-session.mjs';
+import { readQrWebConfig, startQrWeb } from './qr-web.mjs';
 
 const socketPath = process.env.BRIDGE_SOCKET ?? '/run/neo/ai.sock';
 const directory = process.env.BRIDGE_STATE_DIR ?? '/state';
 const qrFile = process.env.BRIDGE_QR_FILE ?? '/run/neo/login.png';
-const statusFile = qrFile + '.status';
 if (!isAbsolute(socketPath) || !isAbsolute(directory) || (qrFile && !isAbsolute(qrFile))) throw new Error('Bridge paths must be absolute');
 const integer = (name, fallback, min, max) => {
   const value = Number(process.env[name] ?? fallback);
@@ -19,11 +19,20 @@ const integer = (name, fallback, min, max) => {
   return value;
 };
 const log = eventLogger('bridge');
-const clearQr = () => { if (qrFile) try { unlinkSync(qrFile); } catch (e) { if (e.code !== 'ENOENT') log({ event: 'qr_cleanup_failed' }); } };
-const writeStatus = status => writeFileSync(statusFile, status, { mode: 0o600 });
-clearQr();
-writeStatus('starting');
+const state = new State(directory);
+const webConfig = readQrWebConfig();
+const limits = {
+  ttlMs: integer('BRIDGE_TTL_MS', 30000, 100, 300000),
+  concurrency: integer('BRIDGE_CONCURRENCY', 4, 1, 16),
+  maxPending: integer('BRIDGE_MAX_PENDING', 100, 1, 1000),
+  maxPerPeer: integer('BRIDGE_MAX_PER_PEER', 5, 1, 100),
+};
 class PuppetBridge extends PuppetNeo {
+  constructor(receiveQr) {
+    super();
+    this.receiveQr = receiveQr;
+  }
+
   createSession() {
     const session = super.createSession();
     const sync = session.sync;
@@ -32,71 +41,58 @@ class PuppetBridge extends PuppetNeo {
       if (result.groupDropped) log({ event: 'group_messages_unresolved', count: result.groupDropped });
       return result;
     };
-    if (qrFile) {
-      const start = session.startLogin;
-      session.startLogin = async () => {
-        const result = await start();
-        writeFileSync(qrFile, Buffer.from(result.png, 'base64'), { mode: 0o600 });
-        return result;
-      };
-    }
+    const start = session.startLogin;
+    session.startLogin = async () => {
+      const result = await start();
+      this.receiveQr(Buffer.from(result.png, 'base64'));
+      return result;
+    };
     return session;
   }
 }
-const client = new AiClient(socketPath);
-const { groupsEnabled } = await client.settings();
-if (groupsEnabled && PuppetNeo.GROUP_TEXT !== true) throw new Error('Group mode requires the group-capable Neo build');
-const puppet = new PuppetBridge();
-const bridge = new Bridge({
-  state: new State(directory), client,
-  send: (peer, text, mentions) => puppet.messageSendText(peer, text, mentions), log, groupsEnabled,
-  loadImage: typeof puppet.downloadImage === 'function' ? id => puppet.downloadImage(id).catch(() => undefined) : undefined,
-  ttlMs: integer('BRIDGE_TTL_MS', 30000, 100, 300000),
-  concurrency: integer('BRIDGE_CONCURRENCY', 4, 1, 16),
-  maxPending: integer('BRIDGE_MAX_PENDING', 100, 1, 1000),
-  maxPerPeer: integer('BRIDGE_MAX_PER_PEER', 5, 1, 100),
-});
-let stopping = false;
-let logoutHandled = false;
-async function shutdown(code) {
-  if (stopping) return; stopping = true;
-  await bridge.offline(); clearQr(); writeStatus('offline');
-  try { await puppet.stop(); } catch { log({ event: 'wechat_stop_failed' }); }
-  process.exitCode = code;
+
+async function createAttempt(receiveQr) {
+  const client = new AiClient(socketPath);
+  const { groupsEnabled } = await client.settings();
+  if (groupsEnabled && PuppetNeo.GROUP_TEXT !== true) throw new Error('Group mode requires the group-capable Neo build');
+  const puppet = new PuppetBridge(receiveQr);
+  const bridge = new Bridge({
+    state, client, log, groupsEnabled, ...limits,
+    send: (peer, text, mentions) => puppet.messageSendText(peer, text, mentions),
+    loadImage: typeof puppet.downloadImage === 'function' ? id => puppet.downloadImage(id).catch(() => undefined) : undefined,
+  });
+  const receiveMessage = async ({ messageId }, active) => {
+    try {
+      const message = await puppet.messagePayload(messageId);
+      if (!active() || ![types.Message.Text, types.Message.Image, types.Message.Video].includes(message.type)) return;
+      await bridge.accept({
+        kind: message.type === types.Message.Image ? 'image' : message.type === types.Message.Video ? 'video' : 'text',
+        id: messageId, senderId: message.talkerId,
+        selfId: puppet.currentUserId, roomId: message.roomId,
+        text: message.text, timestamp: message.timestamp, mentions: message.mentionIdList, senderName: message.neoSenderName,
+        quotedText: message.neoQuotedText,
+      });
+    } catch { log({ event: 'bridge_receive_failed' }); }
+  };
+  return { puppet, bridge, groupsEnabled, receiveMessage };
 }
-puppet.on('scan', ({ status }) => {
-  writeStatus(status === types.ScanStatus.Waiting || status === types.ScanStatus.Scanned ? 'waiting' : 'starting');
-  log({ event: 'login_scan', status: types.ScanStatus[status] });
+
+let stopping = false;
+const login = loginSession({
+  createAttempt, scanStatus: types.ScanStatus, qrFile, log,
+  onLogout: () => runLogoutAlert(log),
+  onEnd: () => { if (!webConfig && !stopping) process.exitCode = 1; },
 });
-puppet.on('login', () => { clearQr(); writeStatus('online'); log({ event: 'wechat_login' }); });
-puppet.on('ready', () => { bridge.online(); log({ event: 'wechat_ready', supports: groupsEnabled ? ['private_text', 'group_text', 'group_mentions'] : ['private_text'] }); });
-puppet.on('logout', () => {
-  if (stopping || logoutHandled) return;
-  logoutHandled = true;
-  log({ event: 'wechat_logout' });
-  void bridge.offline();
-  runLogoutAlert(log);
-  setImmediate(() => { void shutdown(1); });
-});
-puppet.on('error', () => {
-  // Never stringify native exceptions or protocol state into general logs.
-  log({ event: 'wechat_error' });
-  if (!puppet.isLoggedIn) setImmediate(() => { void shutdown(1); });
-});
-puppet.on('message', async ({ messageId }) => {
+const web = webConfig && await startQrWeb(webConfig, login);
+if (web) log({ event: 'qr_web_ready' });
+
+async function shutdown() {
   if (stopping) return;
-  try {
-    const message = await puppet.messagePayload(messageId);
-    if (![types.Message.Text, types.Message.Image, types.Message.Video].includes(message.type)) return;
-    await bridge.accept({
-      kind: message.type === types.Message.Image ? 'image' : message.type === types.Message.Video ? 'video' : 'text',
-      id: messageId, senderId: message.talkerId,
-      selfId: puppet.currentUserId, roomId: message.roomId,
-      text: message.text, timestamp: message.timestamp, mentions: message.mentionIdList, senderName: message.neoSenderName,
-      quotedText: message.neoQuotedText,
-    });
-  } catch { log({ event: 'bridge_receive_failed' }); }
-});
-process.once('SIGINT', () => { void shutdown(0); });
-process.once('SIGTERM', () => { void shutdown(0); });
-await puppet.start();
+  stopping = true;
+  web?.close();
+  await login.close();
+  process.exitCode = 0;
+}
+process.once('SIGINT', () => { void shutdown(); });
+process.once('SIGTERM', () => { void shutdown(); });
+if (!web) login.begin();
