@@ -37,12 +37,14 @@ printf 'HEDWIG_UID=%s\nHEDWIG_GID=%s\n' "$(id -u)" "$(id -g)" > .env
 
 ### 2. 启动并扫码
 
+默认使用终端扫码。想用浏览器扫码的部署者可先配置[内网扫码网页](#内网扫码网页可选)。
+
 ```bash
 docker compose up -d --build
 docker compose exec -T bridge node bridge/login-qr.mjs
 ```
 
-第二条命令把二维码打印在当前终端并退出。用测试账号扫码，在手机上确认。Docker 会在后台保持微信会话，你可以退出 SSH。二维码未准备好时，等几秒再运行显示命令；过期且桥接退出时可运行 `docker compose up -d bridge` 后获取新码。桥接重启后需要重新扫码。
+第二条命令把二维码打印在当前终端并退出。用测试账号扫码，在手机上确认。Docker 会在后台保持微信会话，你可以退出 SSH。二维码未准备好时，等几秒再运行显示命令。终端模式下，二维码过期且桥接已退出时，运行 `docker compose up -d bridge` 再获取新码。启用了内网页面的部署可直接在浏览器发起扫码。
 
 用另一个微信账号发一句「先给我一个提示，怎么比较四分之三和三分之二？」即可检查私聊。也可以发一张去掉姓名和学校的作业截图，让 Hedwig 解释解题步骤。
 
@@ -63,29 +65,44 @@ docker compose exec -T bridge node bridge/admin.mjs id
 ### 日常维护
 
 - 修改 Endpoint、API Key、模型、管理员或 Prompt 后，运行 `docker compose up -d --no-deps --force-recreate ai`。微信桥接可以保持在线，AI 内存里的对话历史会清空。
-- 要开启或关闭群聊，修改 `groupsEnabled`，重载 AI 后运行 `docker compose restart bridge` 并扫码。群内真实 @ 开启接话窗口，单发 🤫 关闭。
-- 请在自己的终端查看二维码和管理员内部 ID。真实的 `config.json`、扫码文件和运行状态都属于本地数据。
+- 要开启或关闭群聊，修改 `groupsEnabled`，重载 AI 后运行 `docker compose restart bridge`。桥接重启需要重新扫码。启用了扫码网页时，打开页面并手动取码。群内真实 @ 开启接话窗口，单发 🤫 关闭。
+- 登录二维码、管理员内部 ID、真实的 `config.json` 和运行状态都属于本地数据。
 
 ### 内网扫码网页（可选）
 
-在部署目录的 `local/bridge.json` 中加入 `qrWeb`。例如，Pi 的内网地址若为 `192.168.1.20`：
+扫码网页由桥接容器提供，和 AI 一起用同一套 Docker Compose 部署。网页适合只在可信内网使用。
 
-```json
-{
-  "qrWeb": {
-    "origin": "http://192.168.1.20:8765",
-    "network": "192.168.1.0/24"
-  }
-}
-```
+1. 在部署目录创建 `local/`，在 `local/bridge.json` 中加入 `qrWeb`。以下用 `192.168.1.20` 举例。保留文件中已有的其他配置项。
 
-在 `.env` 中设 `HEDWIG_QR_BIND=192.168.1.20`。如果用其他端口，加 `HEDWIG_QR_PORT`，并让它与 `origin` 一致。网页仅接受所配置子网和准确地址的请求，限可信内网使用，不应做公网端口转发。
+   ```json
+   {
+     "qrWeb": {
+       "origin": "http://192.168.1.20:8765",
+       "network": "192.168.1.0/24"
+     }
+   }
+   ```
 
-启动桥接后，打开该地址并点击「获取登录二维码」。微信掉线或扫码过期后，网页继续可用。页面等你主动点击再生成新码，已有登录时只显示在线。省略 `qrWeb` 可继续使用终端扫码流程。
+2. 在现有的 `.env` 中加入 `HEDWIG_QR_BIND=192.168.1.20`。如果要使用其他端口，加 `HEDWIG_QR_PORT`，并同步修改 `origin` 的端口。网页无需口令，只接受配置的子网和地址。升级前若已有服务占用扫码页端口，先释放端口或改用其他端口。请勿将这个端口转发到公网。
+3. 首次部署执行 `docker compose up -d --build`。升级现有部署时，可以先构建桥接，准备好扫码后再替换它：
+
+   ```bash
+   git pull --ff-only
+   docker compose build bridge
+   docker compose up -d --no-deps --no-build --force-recreate bridge
+   ```
+
+在同一内网打开配置的地址，点击 **获取登录二维码**，用微信测试账号扫码并在手机上确认。
+
+- **已在线**：网页显示在线，重复点击或刷新不会发起新登录。
+- **微信掉线**：桥接结束当前微信会话，网页继续运行。方便扫码时再点击按钮取新码。
+- **二维码过期或扫码取消**：本轮结束后，同一个页面可以重新取码。页面不会自动反复申请二维码。
+
+不设置 `qrWeb` 时，继续使用终端扫码模式。修改扫码网页配置后，需要重新创建桥接才能生效。
 
 ### 微信掉线脚本（可选）
 
-在部署目录创建 `local/bridge.json`，设置要调用的本地脚本文件名：
+在同一个 `local/bridge.json` 中加入 `alertScript`，设置要调用的本地脚本文件名。使用扫码网页时保留已有的 `qrWeb`：
 
 ```json
 {"alertScript": "alert.mjs"}
@@ -93,7 +110,7 @@ docker compose exec -T bridge node bridge/admin.mjs id
 
 把脚本放在 `local/alert.mjs`，赋予执行权限，并让它使用桥接容器中已有的解释器。Compose 会将这个目录只读挂入桥接，Git 会忽略它。
 
-微信登出时，桥接会读取该配置，把 `wechat_logout` 和 UTC 时间作为两个参数传给脚本。脚本应在 12 秒内完成。配置文件或字段缺失时跳过。扫码网页配置在桥接进程启动时读取。通知脚本设置在登出时读取，脚本和通知设置可直接在本地更新。
+已登录的微信会话掉线时，桥接会读取该配置，把 `wechat_logout` 和 UTC 时间作为两个参数传给脚本。脚本应在 12 秒内完成。正常停机和扫码超时不会调用脚本。通知脚本及其配置可直接在本地更新。
 
 ### 日志
 
