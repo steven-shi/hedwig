@@ -17,12 +17,12 @@ test('one active login at a time, offline alerts once, and later attempts keep t
   const attempts = [], ends = new EventEmitter();
   const login = loginSession({
     scanStatus, log: () => {}, onLogout: () => alerts++, onEnd: () => ends.emit('end'),
-    async createAttempt(receiveQr) {
+    async createAttempt(receiveQr, reportRecovery) {
       const puppet = new EventEmitter();
       const bridge = { active: false, online() { this.active = true; }, async offline() { this.active = false; } };
       puppet.start = async () => { receiveQr(png); scan(puppet, 'Waiting'); };
       puppet.stop = async () => { puppet.stopped = true; puppet.emit('logout'); };
-      attempts.push({ puppet, bridge, receiveQr });
+      attempts.push({ puppet, bridge, receiveQr, reportRecovery });
       return { puppet, bridge };
     },
   });
@@ -38,9 +38,21 @@ test('one active login at a time, offline alerts once, and later attempts keep t
   scan(first, 'Confirmed');
   first.emit('login');
   assert.deepEqual(login.status(), { phase: 'confirmed', png: undefined });
+  const { reportRecovery } = attempts[0];
+  reportRecovery({ event: 'wechat_reconnecting' });
+  assert.deepEqual(login.begin(), { phase: 'reconnecting', png: undefined });
+  reportRecovery({ event: 'wechat_reconnected' });
+  assert.equal(login.status().phase, 'confirmed');
   first.emit('ready');
   assert.equal(attempts[0].bridge.active, true);
   assert.equal(login.begin().phase, 'online');
+  reportRecovery({ event: 'wechat_reconnecting' });
+  assert.deepEqual(login.begin(), { phase: 'reconnecting', png: undefined });
+  assert.equal(attempts[0].bridge.active, true);
+  assert.equal(alerts, 0);
+  reportRecovery({ event: 'wechat_reconnected' });
+  assert.equal(login.status().phase, 'online');
+  assert.equal(attempts.length, 1);
   let ended = once(ends, 'end');
   first.emit('logout');
   first.emit('logout');

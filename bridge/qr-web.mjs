@@ -30,6 +30,7 @@ const qr = document.querySelector('#qr');
 const button = document.querySelector('#start');
 const messages = {
   online: '微信已登录，Hedwig 正在运行。',
+  reconnecting: '微信连接中断，正在尝试恢复会话…',
   offline: '微信已离线。准备好扫码后，再点下面的按钮。',
   waiting: '请用微信测试小号扫码，并在手机上确认登录。',
   starting: '正在向微信申请二维码…',
@@ -57,7 +58,7 @@ async function refresh(start = false) {
     if (visible && !qr.hasAttribute('src')) qr.src = '/qr.png';
     if (!visible) qr.removeAttribute('src');
     button.textContent = state === 'online' ? '刷新状态' : '获取登录二维码';
-    const pending = ['starting', 'waiting', 'scanned', 'confirmed', 'closing', 'expiring'].includes(state);
+    const pending = ['starting', 'waiting', 'scanned', 'confirmed', 'reconnecting', 'closing', 'expiring'].includes(state);
     button.disabled = pending || state === 'stop_failed';
     if (pending) timer = setTimeout(refresh, 1500);
   } catch {

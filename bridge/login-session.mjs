@@ -63,7 +63,7 @@ export function loginSession({ createAttempt, scanStatus, qrFile, log, onLogout,
 
   function begin() {
     if (closing || current) return status();
-    const attempt = { ended: false, authenticated: false };
+    const attempt = { ended: false, authenticated: false, ready: false };
     current = attempt;
     clearQr();
     setPhase('starting');
@@ -76,6 +76,11 @@ export function loginSession({ createAttempt, scanStatus, qrFile, log, onLogout,
           try { writeFileSync(qrFile, png, { mode: 0o600 }); }
           catch { log({ event: 'qr_write_failed' }); }
         }
+      }, event => {
+        if (attempt.ended) return;
+        log(event);
+        if (event.event === 'wechat_reconnecting' && phase !== 'reconnecting') setPhase('reconnecting');
+        if (event.event === 'wechat_reconnected' && phase === 'reconnecting') setPhase(attempt.ready ? 'online' : 'confirmed');
       });
       Object.assign(attempt, { puppet, bridge });
       puppet.on('error', () => {
@@ -104,6 +109,7 @@ export function loginSession({ createAttempt, scanStatus, qrFile, log, onLogout,
       });
       puppet.on('ready', () => {
         if (attempt.ended) return;
+        attempt.ready = true;
         bridge.online();
         setPhase('online');
         log({ event: 'wechat_ready', supports: groupsEnabled ? ['private_text', 'group_text', 'group_mentions'] : ['private_text'] });

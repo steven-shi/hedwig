@@ -23,9 +23,9 @@ def replace(text,old,new):
         raise RuntimeError('Pinned source pattern mismatch: '+old[:80])
     return text.replace(old,new,1)
 
-cargo = replace(original('native/Cargo.toml'),'wechat-protocol = "=2.1.0"','wechat-protocol = "=2.1.0"\nroxmltree = "=0.20.0"')
+cargo = replace(original('native/Cargo.toml'),'wechat-protocol = "=2.1.0"','wechat-protocol = "=2.2.0"\nroxmltree = "=0.20.0"')
 native = original('native/src/lib.rs')
-native = replace(native,'use std::{','mod groups;\nmod images;\n\nuse std::{')
+native = replace(native,'use std::{','mod groups;\nmod images;\nmod recovery;\n\nuse std::{')
 native = replace(native,'    time::{Duration, SystemTime, UNIX_EPOCH},','    time::{Duration, Instant, SystemTime, UNIX_EPOCH},\n    collections::HashMap,')
 native = replace(native,'    received_cursor: Vec<u8>,','    received_cursor: Vec<u8>,\n    rooms: HashMap<String, groups::RoomView>,\n    room_failures: HashMap<String, Instant>,\n    group_live_since: u32,')
 native = replace(native,'    group_live_since: u32,','    group_live_since: u32,\n    pending_images: std::collections::VecDeque<(String, Instant, wechat_protocol::media::MediaDescriptor)>,')
@@ -34,7 +34,9 @@ native = replace(native,'    sender_name: Option<String>,','    sender_name: Opt
 native = replace(native,'    LookupSelf,','    DownloadImage { id: String },\n    LookupSelf,')
 native = replace(native,'    pub fn lookup_self(&self) -> AsyncTask<NeoTask> {','    pub fn download_image(&self, id: String) -> AsyncTask<NeoTask> {\n        self.task(Operation::DownloadImage { id })\n    }\n\n    #[napi]\n    pub fn lookup_self(&self) -> AsyncTask<NeoTask> {')
 native = replace(native,'            Operation::LookupSelf =>','            Operation::DownloadImage { .. } => "download an image",\n            Operation::LookupSelf =>')
-native = replace(native,'        run(&mut session, operation).map_err(|error| {','''        let result = match operation {
+native = replace(native,'        run(&mut session, operation).map_err(|error| {','''        let read = session.account.is_some()
+            && matches!(&operation, Operation::Heartbeat | Operation::PollIncoming | Operation::Sync { .. });
+        let result = match operation {
             Operation::DownloadImage { id } => {
                 let prepared = prepare_image(&mut session, &id);
                 drop(session);
@@ -43,6 +45,38 @@ native = replace(native,'        run(&mut session, operation).map_err(|error| {'
             other => run(&mut session, other),
         };
         result.map_err(|error| {''')
+native = replace(native, '''            if error.is::<SessionEnded>() {
+                napi::Error::from_reason(SESSION_ENDED)
+            } else {''', '''            if read {
+                napi::Error::from_reason(recovery::read_failure(&error))
+            } else {''')
+start = native.index('/// Error text TypeScript receives')
+end = native.index('#[derive(Default)]', start)
+native = native[:start] + native[end:]
+start = native.index('/// Read-only session work can repeat')
+end = native.index('fn lookup_self(', start)
+native = native[:start] + '''fn read_session<T>(session: &mut Session, operation: impl FnMut(&mut Session) -> Result<T>) -> Result<T> {
+    recovery::recover(session, operation, |session| {
+        session.account.as_ref().context("No active session")?.renew_session_blocking(DEVICE_NAME)
+    }, |session| session.incoming = None)
+}
+
+''' + native[end:]
+native = native.replace('with_renewal(session,', 'read_session(session,')
+native = replace(native, '''            let connection = session
+                .incoming
+                .as_mut()
+                .context("No incoming connection")?;
+            match connection.poll(Duration::from_secs(1)) {
+                Ok(notification) => Ok(json!(''', '''            let notification = session.incoming.as_mut().map(|connection| connection.poll(Duration::from_secs(1)));
+            match notification {
+                Some(Ok(notification)) => Ok(json!(''')
+native = replace(native, '''                Err(_) => {
+                    // The notification socket closed. Reconnect and let one''', '''                _ => {
+                    // The notification socket is unavailable. Reconnect and let one''')
+start = native.index('    #[test]\n    fn only_whole_credential_rejections_end_the_session()')
+end = native.index('    #[test]', start + 12)
+native = native[:start] + native[end:]
 native = replace(native,'        Operation::LookupSelf => lookup_self(session),','        Operation::DownloadImage { .. } => Err(anyhow!("Image task must release the session lock")),\n        Operation::LookupSelf => lookup_self(session),')
 native = replace(native,'    SendText { destination: String, text: String },','    SendText { destination: String, text: String, mentions: Vec<String> },')
 native = replace(native,'    pub fn send_text(&self, destination: String, text: String) -> AsyncTask<NeoTask> {\n        self.task(Operation::SendText { destination, text })\n    }','    pub fn send_text(&self, destination: String, text: String, mentions: Option<Vec<String>>) -> AsyncTask<NeoTask> {\n        self.task(Operation::SendText { destination, text, mentions: mentions.unwrap_or_default() })\n    }')
@@ -128,6 +162,8 @@ interface = replace(interface,'  sendText(destination: string, text: string): Pr
 interface = replace(interface,'    sendText: async (destination, text) => JSON.parse(await addon.sendText(destination, text)),','    sendText: async (destination, text, mentions) => JSON.parse(await addon.sendText(destination, text, mentions)),')
 
 puppet = original('src/puppet-neo.ts')
+puppet = replace(puppet, 'error.message === SESSION_ENDED',
+    r'(error.message === SESSION_ENDED || /^NEO_READ:auth_required(?::-?\d{1,10})?$/u.test(error.message))')
 puppet = replace(puppet,"  static override readonly VERSION = '0.1.0'", "  static override readonly VERSION = '0.1.0'\n  static readonly GROUP_TEXT = true")
 puppet = replace(puppet,'  private readonly messages = new Map<string, payloads.Message>()','  private readonly messages = new Map<string, payloads.Message>()\n  private readonly rooms = new Set<string>()')
 puppet = replace(puppet,'      this.messages.clear()','      this.messages.clear()\n      this.rooms.clear()')
@@ -158,8 +194,10 @@ puppet = replace(puppet,'        putRecent(this.messages, item.id, {\n          
         }
         putRecent(this.messages, item.id, payload)''')
 files = {'native/Cargo.toml':cargo,'native/src/lib.rs':native,'src/native.ts':interface,'src/puppet-neo.ts':puppet}
-for path in ['native/src/groups.rs','native/src/images.rs','test/groups.test.ts']:
+for path in ['native/src/groups.rs','native/src/images.rs','native/src/recovery.rs','test/groups.test.ts']:
     files[path] = (root/'neo-overlay'/path).read_text()
+files['test/ding-dong.test.ts'] = replace(original('test/ding-dong.test.ts'),
+    "const SESSION_ENDED = 'Neo session ended by WeChat'", "const SESSION_ENDED = 'NEO_READ:auth_required:-100'")
 record = {}
 for name,body in files.items():
     p = source/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_text(body)

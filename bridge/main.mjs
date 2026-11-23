@@ -7,6 +7,7 @@ import { AiClient } from './client.mjs';
 import { eventLogger } from './log.mjs';
 import { runLogoutAlert } from './logout-alert.mjs';
 import { loginSession } from './login-session.mjs';
+import { sessionRecovery } from './session-recovery.mjs';
 import { readQrWebConfig, startQrWeb } from './qr-web.mjs';
 
 const socketPath = process.env.BRIDGE_SOCKET ?? '/run/neo/ai.sock';
@@ -28,18 +29,30 @@ const limits = {
   maxPerPeer: integer('BRIDGE_MAX_PER_PEER', 5, 1, 100),
 };
 class PuppetBridge extends PuppetNeo {
-  constructor(receiveQr) {
+  constructor(receiveQr, reportRecovery) {
     super();
     this.receiveQr = receiveQr;
+    this.recovery = sessionRecovery(reportRecovery);
+  }
+
+  async onStop() {
+    this.recovery.abort();
+    await super.onStop();
   }
 
   createSession() {
     const session = super.createSession();
-    const sync = session.sync;
+    const { heartbeat, pollIncoming, sync, sendText } = session;
+    session.heartbeat = () => this.recovery.read('heartbeat', heartbeat);
+    session.pollIncoming = () => this.recovery.read('poll', pollIncoming);
     session.sync = async scene => {
-      const result = await sync(scene);
+      const result = await this.recovery.read('sync', () => sync(scene));
       if (result.groupDropped) log({ event: 'group_messages_unresolved', count: result.groupDropped });
       return result;
+    };
+    session.sendText = (destination, text, mentions) => {
+      if (this.recovery.reconnecting) throw new Error('Neo session is reconnecting');
+      return sendText(destination, text, mentions);
     };
     const start = session.startLogin;
     session.startLogin = async () => {
@@ -51,11 +64,11 @@ class PuppetBridge extends PuppetNeo {
   }
 }
 
-async function createAttempt(receiveQr) {
+async function createAttempt(receiveQr, reportRecovery) {
   const client = new AiClient(socketPath);
   const { groupsEnabled } = await client.settings();
   if (groupsEnabled && PuppetNeo.GROUP_TEXT !== true) throw new Error('Group mode requires the group-capable Neo build');
-  const puppet = new PuppetBridge(receiveQr);
+  const puppet = new PuppetBridge(receiveQr, reportRecovery);
   const bridge = new Bridge({
     state, client, log, groupsEnabled, ...limits,
     send: (peer, text, mentions) => puppet.messageSendText(peer, text, mentions),
