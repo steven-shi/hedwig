@@ -1,8 +1,12 @@
 """Prepare a pinned, independent Neo group-text source tree without touching live containers."""
 from pathlib import Path
+from io import BytesIO
 import subprocess
 import hashlib
 import json
+import os
+import tarfile
+from urllib.request import urlopen
 
 root = Path(__file__).resolve().parent.parent
 source = root / 'neo-group-source'
@@ -23,7 +27,24 @@ def replace(text,old,new):
         raise RuntimeError('Pinned source pattern mismatch: '+old[:80])
     return text.replace(old,new,1)
 
-cargo = replace(original('native/Cargo.toml'),'wechat-protocol = "=2.1.0"','wechat-protocol = "=2.2.0"\nroxmltree = "=0.20.0"')
+protocol_name = 'wechat-protocol-2.2.0'
+protocol_archive = os.environ.get('HEDWIG_PROTOCOL_ARCHIVE')
+if protocol_archive:
+    protocol_bytes = Path(protocol_archive).read_bytes()
+else:
+    with urlopen(f'https://static.crates.io/crates/wechat-protocol/{protocol_name}.crate', timeout=30) as response:
+        protocol_bytes = response.read()
+if hashlib.sha256(protocol_bytes).hexdigest() != '31dd60cd137a312e5b531d8ea9ea4115939e64284a97d261c33a2be572308ff7':
+    raise SystemExit('Unexpected wechat-protocol archive checksum')
+with tarfile.open(fileobj=BytesIO(protocol_bytes)) as archive:
+    archive.extractall(source / 'native', filter='data')
+protocol_dir = source / 'native' / protocol_name / 'src'
+protocol_request = protocol_dir / 'account_request.rs'
+protocol_request.write_text(protocol_request.read_text() + '\n#[path = "hedwig_moments.rs"]\nmod hedwig_moments;\n')
+(protocol_dir / 'hedwig_moments.rs').write_text((root / 'neo-overlay/protocol/hedwig_moments.rs').read_text())
+
+cargo = replace(original('native/Cargo.toml'),'wechat-protocol = "=2.1.0"',
+    f'wechat-protocol = {{ version = "=2.2.0", path = "{protocol_name}" }}\nroxmltree = "=0.20.0"')
 native = original('native/src/lib.rs')
 native = replace(native,'use std::{','mod groups;\nmod images;\nmod recovery;\n\nuse std::{')
 native = replace(native,'    time::{Duration, SystemTime, UNIX_EPOCH},','    time::{Duration, Instant, SystemTime, UNIX_EPOCH},\n    collections::HashMap,')
@@ -151,6 +172,26 @@ fn text_messages(session: &mut Session, commands: Vec<wire::SyncCommand>, userna
 }
 ''' + native[end:]
 native = replace(native,'        let messages = text_messages(\n            vec![','        let (messages, _) = text_messages(\n            &mut Session::default(),\n            vec![')
+native = replace(native, 'mod recovery;', 'mod recovery;\nmod moments;')
+native = replace(native, '    group_live_since: u32,',
+    '    group_live_since: u32,\n    moments: HashMap<String, String>,\n    self_nickname: Option<String>,')
+native = replace(native, '    LookupSelf,', '    LookupSelf,\n    MomentsHomepage,\n    LikeMoment { id: String },')
+native = replace(native, '    pub fn lookup_self(&self) -> AsyncTask<NeoTask> {', '''    pub fn moments_homepage(&self) -> AsyncTask<NeoTask> {
+        self.task(Operation::MomentsHomepage)
+    }
+
+    #[napi]
+    pub fn like_moment(&self, id: String) -> AsyncTask<NeoTask> {
+        self.task(Operation::LikeMoment { id })
+    }
+
+    #[napi]
+    pub fn lookup_self(&self) -> AsyncTask<NeoTask> {''')
+native = replace(native, '            Operation::LookupSelf => "look up the account profile",',
+    '            Operation::LookupSelf => "look up the account profile",\n            Operation::MomentsHomepage => "read Moments",\n            Operation::LikeMoment { .. } => "submit a Moments like",')
+native = replace(native, '        Operation::LookupSelf => lookup_self(session),',
+    '        Operation::LookupSelf => lookup_self(session),\n        Operation::MomentsHomepage => moments::homepage(session),\n        Operation::LikeMoment { id } => moments::like(session, &id),')
+native = replace(native, '    Ok(json!(profile))', '    session.self_nickname = profile.nickname.clone();\n    Ok(json!(profile))')
 
 interface = original('src/native.ts')
 interface = replace(interface,'  timestamp: number\n}','  timestamp: number\n  roomId?: string\n  mentions?: string[]\n  senderName?: string\n  image?: boolean\n  video?: boolean\n  quotedText?: string\n}')
@@ -160,6 +201,12 @@ interface = replace(interface,'    lookupSelf: async () =>','    downloadImage: 
 interface = replace(interface,'  sync(scene: 1 | 6 | 7): Promise<{ messages: IncomingText[], continuation: boolean }>','  sync(scene: 1 | 6 | 7): Promise<{ messages: IncomingText[], continuation: boolean, groupDropped?: number }>')
 interface = replace(interface,'  sendText(destination: string, text: string): Promise<{ status:', '  sendText(destination: string, text: string, mentions?: string[]): Promise<{ status:')
 interface = replace(interface,'    sendText: async (destination, text) => JSON.parse(await addon.sendText(destination, text)),','    sendText: async (destination, text, mentions) => JSON.parse(await addon.sendText(destination, text, mentions)),')
+interface = replace(interface, '  lookupSelf(): Promise<SelfProfile>', '''  momentsHomepage?(): Promise<{ id: string, createdAt: number, liked: boolean | null, isSelf: boolean | null }[]>
+  likeMoment?(id: string): Promise<{ status: 'accepted' | 'rejected', serviceCode?: number }>
+  lookupSelf(): Promise<SelfProfile>''')
+interface = replace(interface, '    lookupSelf: async () =>', '''    momentsHomepage: async () => JSON.parse(await addon.momentsHomepage!()),
+    likeMoment: async id => JSON.parse(await addon.likeMoment!(id)),
+    lookupSelf: async () =>''')
 
 puppet = original('src/puppet-neo.ts')
 puppet = replace(puppet, 'error.message === SESSION_ENDED',
@@ -194,7 +241,7 @@ puppet = replace(puppet,'        putRecent(this.messages, item.id, {\n          
         }
         putRecent(this.messages, item.id, payload)''')
 files = {'native/Cargo.toml':cargo,'native/src/lib.rs':native,'src/native.ts':interface,'src/puppet-neo.ts':puppet}
-for path in ['native/src/groups.rs','native/src/images.rs','native/src/recovery.rs','test/groups.test.ts']:
+for path in ['native/src/groups.rs','native/src/images.rs','native/src/recovery.rs','native/src/moments.rs','test/groups.test.ts']:
     files[path] = (root/'neo-overlay'/path).read_text()
 files['test/ding-dong.test.ts'] = replace(original('test/ding-dong.test.ts'),
     "const SESSION_ENDED = 'Neo session ended by WeChat'", "const SESSION_ENDED = 'NEO_READ:auth_required:-100'")

@@ -40,12 +40,14 @@ export function loginSession({ createAttempt, scanStatus, qrFile, log, onLogout,
     attempt.ended = true;
     clearQr();
     setPhase('closing');
+    const momentsDone = attempt.stopMoments?.();
     const offline = attempt.bridge?.offline();
     attempt.done = (async () => {
       // Neo waits for its own event loop in stop(); let the emitting callback return first.
       await nextTick();
       await attempt.started;
       await offline;
+      await momentsDone;
       try { await attempt.puppet?.stop(); }
       catch {
         log({ event: 'wechat_stop_failed' });
@@ -68,7 +70,7 @@ export function loginSession({ createAttempt, scanStatus, qrFile, log, onLogout,
     clearQr();
     setPhase('starting');
     attempt.started = (async () => {
-      const { puppet, bridge, groupsEnabled, receiveMessage } = await createAttempt(data => {
+      const { puppet, bridge, groupsEnabled, receiveMessage, startMoments } = await createAttempt(data => {
         if (attempt.ended || attempt.authenticated) return;
         png = data;
         generatedAt = Date.now();
@@ -108,11 +110,12 @@ export function loginSession({ createAttempt, scanStatus, qrFile, log, onLogout,
         log({ event: 'wechat_login' });
       });
       puppet.on('ready', () => {
-        if (attempt.ended) return;
+        if (attempt.ended || attempt.ready) return;
         attempt.ready = true;
         bridge.online();
         setPhase('online');
         log({ event: 'wechat_ready', supports: groupsEnabled ? ['private_text', 'group_text', 'group_mentions'] : ['private_text'] });
+        attempt.stopMoments = startMoments?.(() => !attempt.ended && phase === 'online');
       });
       puppet.on('logout', () => {
         if (attempt.ended) return;

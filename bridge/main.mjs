@@ -9,6 +9,7 @@ import { runLogoutAlert } from './logout-alert.mjs';
 import { loginSession } from './login-session.mjs';
 import { sessionRecovery } from './session-recovery.mjs';
 import { readQrWebConfig, startQrWeb } from './qr-web.mjs';
+import { readMomentsAutoLikeConfig, startMomentsAutoLike } from './moments-auto-like.mjs';
 
 const socketPath = process.env.BRIDGE_SOCKET ?? '/run/neo/ai.sock';
 const directory = process.env.BRIDGE_STATE_DIR ?? '/state';
@@ -22,6 +23,9 @@ const integer = (name, fallback, min, max) => {
 const log = eventLogger('bridge');
 const state = new State(directory);
 const webConfig = readQrWebConfig();
+let momentsEnabled = false;
+try { momentsEnabled = readMomentsAutoLikeConfig(); }
+catch { log({ event: 'moments_auto_like_config_invalid' }); }
 const limits = {
   ttlMs: integer('BRIDGE_TTL_MS', 30000, 100, 300000),
   concurrency: integer('BRIDGE_CONCURRENCY', 4, 1, 16),
@@ -42,6 +46,7 @@ class PuppetBridge extends PuppetNeo {
 
   createSession() {
     const session = super.createSession();
+    this.nativeSession = session;
     const { heartbeat, pollIncoming, sync, sendText } = session;
     session.heartbeat = () => this.recovery.read('heartbeat', heartbeat);
     session.pollIncoming = () => this.recovery.read('poll', pollIncoming);
@@ -87,7 +92,17 @@ async function createAttempt(receiveQr, reportRecovery) {
       });
     } catch { log({ event: 'bridge_receive_failed' }); }
   };
-  return { puppet, bridge, groupsEnabled, receiveMessage };
+  const startMoments = momentsEnabled ? available => {
+    const native = puppet.nativeSession;
+    if (typeof native?.momentsHomepage !== 'function' || typeof native.likeMoment !== 'function') {
+      log({ event: 'moments_auto_like_native_unavailable' });
+      return;
+    }
+    return startMomentsAutoLike({ state, accountId: puppet.currentUserId, log,
+      available: () => available() && !puppet.recovery.reconnecting,
+      homepage: native.momentsHomepage, like: native.likeMoment });
+  } : undefined;
+  return { puppet, bridge, groupsEnabled, receiveMessage, startMoments };
 }
 
 let stopping = false;

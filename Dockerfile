@@ -22,6 +22,8 @@ RUN npm ci --ignore-scripts --no-audit --no-fund \
 FROM runtime AS bridge
 COPY --from=neo-build /build/neo-group-source/package.json ./package.json
 COPY --from=neo-build /build/neo-group-source/LICENSE ./licenses/PUPPET-NEO-LICENSE
+COPY --from=neo-build /build/neo-group-source/native/wechat-protocol-2.2.0/LICENSE ./licenses/WECHAT-PROTOCOL-LICENSE
+COPY --from=neo-build /build/neo-group-source/native/wechat-protocol-2.2.0/NOTICE ./licenses/WECHAT-PROTOCOL-NOTICE
 COPY --from=neo-build /build/neo-group-source/node_modules ./node_modules
 COPY --from=neo-build /build/neo-group-source/dist ./dist
 COPY --from=neo-build /build/neo-group-source/native/linux-arm64 ./native/linux-arm64

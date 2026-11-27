@@ -14,6 +14,7 @@ const scan = (attempt, status) => attempt.emit('scan', { status: scanStatus[stat
 
 test('one active login at a time, offline alerts once, and later attempts keep the same web process', async () => {
   let alerts = 0;
+  let jobsStarted = 0, jobsStopped = 0, jobAvailable;
   const attempts = [], ends = new EventEmitter();
   const login = loginSession({
     scanStatus, log: () => {}, onLogout: () => alerts++, onEnd: () => ends.emit('end'),
@@ -23,7 +24,11 @@ test('one active login at a time, offline alerts once, and later attempts keep t
       puppet.start = async () => { receiveQr(png); scan(puppet, 'Waiting'); };
       puppet.stop = async () => { puppet.stopped = true; puppet.emit('logout'); };
       attempts.push({ puppet, bridge, receiveQr, reportRecovery });
-      return { puppet, bridge };
+      return { puppet, bridge, startMoments(available) {
+        jobsStarted++;
+        jobAvailable = available;
+        return () => { jobsStopped++; };
+      } };
     },
   });
   assert.equal(login.status().phase, 'offline');
@@ -44,10 +49,14 @@ test('one active login at a time, offline alerts once, and later attempts keep t
   reportRecovery({ event: 'wechat_reconnected' });
   assert.equal(login.status().phase, 'confirmed');
   first.emit('ready');
+  first.emit('ready');
+  assert.equal(jobsStarted, 1);
+  assert.equal(jobAvailable(), true);
   assert.equal(attempts[0].bridge.active, true);
   assert.equal(login.begin().phase, 'online');
   reportRecovery({ event: 'wechat_reconnecting' });
   assert.deepEqual(login.begin(), { phase: 'reconnecting', png: undefined });
+  assert.equal(jobAvailable(), false);
   assert.equal(attempts[0].bridge.active, true);
   assert.equal(alerts, 0);
   reportRecovery({ event: 'wechat_reconnected' });
@@ -59,6 +68,7 @@ test('one active login at a time, offline alerts once, and later attempts keep t
   assert.equal(login.begin().phase, 'closing');
   await ended;
   assert.equal(alerts, 1);
+  assert.equal(jobsStopped, 1);
   assert.equal(attempts[0].bridge.active, false);
   assert.equal(first.stopped, true);
   assert.equal(login.status().phase, 'offline');
