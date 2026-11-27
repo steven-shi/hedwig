@@ -1,8 +1,43 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 646b50a..209d786 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -898,6 +898,12 @@ dependencies = [
+  "windows-sys 0.52.0",
+ ]
+
++[[package]]
++name = "roxmltree"
++version = "0.20.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
++
+ [[package]]
+ name = "rustc-hash"
+ version = "2.1.3"
+@@ -1446,6 +1452,7 @@ dependencies = [
+  "image",
+  "openssl",
+  "reqwest",
++ "roxmltree",
+  "serde",
+  "serde_json",
+  "tokio",
 diff --git a/Cargo.toml b/Cargo.toml
-index 7e8c251..0a8dbd8 100644
+index 7e8c251..466fc63 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -131,3 +131,7 @@ features = ["derive"]
+@@ -102,6 +102,9 @@ features = [
+ ]
+ default-features = false
+
++[dependencies.roxmltree]
++version = "=0.20.0"
++
+ [dependencies.serde]
+ version = "1"
+ features = ["derive"]
+@@ -131,3 +134,7 @@ features = ["derive"]
 
  [build-dependencies.cc]
  version = "1"
@@ -11,14 +46,18 @@ index 7e8c251..0a8dbd8 100644
 +name = "moments_trial"
 +path = "examples/moments_trial.rs"
 diff --git a/src/account.rs b/src/account.rs
-index 1e30863..6747925 100644
+index 1e30863..75aecaa 100644
 --- a/src/account.rs
 +++ b/src/account.rs
-@@ -750,6 +750,7 @@ pub use push::AccountPushConnection;
+@@ -750,6 +750,11 @@ pub use push::AccountPushConnection;
 
  #[path = "account_operations.rs"]
  mod operations;
 +pub use operations::MomentsTrialReceipt;
++
++#[path = "moments_timeline.rs"]
++mod moments_timeline;
++pub use moments_timeline::{MomentsLikeResult, MomentsPhoto, MomentsPost};
 
  async fn wait_for_poll<R, C, S>(reply: R, cancellation: C, stopped: S) -> Result<Vec<u8>>
  where
@@ -178,14 +217,14 @@ index 5069466..df3a4ca 100644
 +    }
 +}
 diff --git a/src/client.rs b/src/client.rs
-index c58d06f..5e6f522 100644
+index c58d06f..79b71ae 100644
 --- a/src/client.rs
 +++ b/src/client.rs
 @@ -9,6 +9,7 @@ mod group_inventory;
  pub use group_inventory::*;
  #[path = "account.rs"]
  mod account;
-+pub use account::MomentsTrialReceipt;
++pub use account::{MomentsLikeResult, MomentsPhoto, MomentsPost, MomentsTrialReceipt};
  #[path = "logout.rs"]
  mod logout;
  #[path = "revoke.rs"]
