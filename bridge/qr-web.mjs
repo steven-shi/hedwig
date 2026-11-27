@@ -87,6 +87,10 @@ function addressRange(cidr) {
 
 const privateRanges = ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8'].map(addressRange);
 
+function includesAddress({ first, last }, address) {
+  return first <= address && address <= last;
+}
+
 export function readQrWebConfig(file = 'local/bridge.json') {
   let raw;
   try { raw = readFileSync(file, 'utf8'); }
@@ -94,14 +98,20 @@ export function readQrWebConfig(file = 'local/bridge.json') {
   const { qrWeb } = JSON.parse(raw);
   if (qrWeb === undefined || qrWeb === false) return;
   const origin = new URL(qrWeb?.origin);
-  const range = addressRange(qrWeb.network);
-  if (origin.protocol !== 'http:' || origin.origin !== qrWeb.origin || !isIPv4(origin.hostname) || !range ||
-      !privateRanges.some(privateRange => range.first >= privateRange.first && range.last <= privateRange.last)) {
-    throw new Error('qrWeb requires an HTTP origin and a private IPv4 subnet');
+  if (origin.protocol !== 'http:' || origin.origin !== qrWeb.origin || !isIPv4(origin.hostname)) {
+    throw new Error('qrWeb requires an HTTP origin with a private IPv4 address');
   }
+  const range = addressRange(qrWeb.network);
+  if (qrWeb.network !== undefined && (!range || !privateRanges.some(privateRange =>
+    includesAddress(privateRange, range.first) && includesAddress(privateRange, range.last)))) {
+    throw new Error('qrWeb.network must be a private IPv4 subnet when specified');
+  }
+  const ranges = range ? [range] : privateRanges;
   const host = ipv4Number(origin.hostname);
-  if (host < range.first || host > range.last) throw new Error('qrWeb origin must be inside its subnet');
-  return { origin: origin.origin, authority: origin.host, range };
+  if (!ranges.some(allowed => includesAddress(allowed, host))) {
+    throw new Error('qrWeb origin must be inside an allowed private IPv4 subnet');
+  }
+  return { origin: origin.origin, authority: origin.host, ranges };
 }
 
 export async function startQrWeb(config, login, { port = 8765, host = '0.0.0.0' } = {}) {
@@ -115,7 +125,7 @@ export async function startQrWeb(config, login, { port = 8765, host = '0.0.0.0' 
     };
     const peer = req.socket.remoteAddress?.replace(/^::ffff:/u, '');
     const address = isIPv4(peer ?? '') ? ipv4Number(peer) : -1;
-    if (req.headers.host !== config.authority || address < config.range.first || address > config.range.last) {
+    if (req.headers.host !== config.authority || !config.ranges.some(range => includesAddress(range, address))) {
       return respond(403, 'Forbidden');
     }
     const state = ({ phase }) => respond(200, JSON.stringify({ state: phase }), 'application/json');

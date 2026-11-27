@@ -69,6 +69,26 @@ test('one active login at a time, offline alerts once, and later attempts keep t
   assert.equal(attempts.length, 3);
 });
 
+test('QR configuration defaults to private IPv4 across subnets', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'hedwig-http-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const file = join(directory, 'bridge.json');
+  const writeConfig = origin => writeFileSync(file, JSON.stringify({ qrWeb: { origin } }));
+  writeConfig('http://192.168.1.20:8765');
+  const { ranges } = readQrWebConfig(file);
+  const allowed = host => {
+    const address = host.split('.').reduce((value, part) => value * 256 + Number(part), 0);
+    return ranges.some(({ first, last }) => first <= address && address <= last);
+  };
+  assert.equal(allowed('192.168.2.30'), true);
+  assert.equal(allowed('10.0.0.5'), true);
+  assert.equal(allowed('172.31.255.254'), true);
+  assert.equal(allowed('172.32.0.1'), false);
+  assert.equal(allowed('8.8.8.8'), false);
+  writeConfig('http://8.8.8.8:8765');
+  assert.throws(() => readQrWebConfig(file), /private IPv4/);
+});
+
 test('QR HTTP stays on its configured private network and starts only on a same-origin POST', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'hedwig-http-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));

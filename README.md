@@ -77,13 +77,12 @@ docker compose exec -T bridge node bridge/admin.mjs id
    ```json
    {
      "qrWeb": {
-       "origin": "http://192.168.1.20:8765",
-       "network": "192.168.1.0/24"
+       "origin": "http://192.168.1.20:8765"
      }
    }
    ```
 
-2. 在现有的 `.env` 中加入 `HEDWIG_QR_BIND=192.168.1.20`。如果要使用其他端口，加 `HEDWIG_QR_PORT`，并同步修改 `origin` 的端口。网页无需口令，只接受配置的子网和地址。升级前若已有服务占用扫码页端口，先释放端口或改用其他端口。请勿将这个端口转发到公网。
+2. 在现有的 `.env` 中加入 `HEDWIG_QR_BIND=192.168.1.20`。如果要使用其他端口，加 `HEDWIG_QR_PORT`，并同步修改 `origin` 的端口。网页无需口令，默认接受可达的私有 IPv4 网段。可以加上 `"network": "192.168.1.0/24"` 限制来源。已有单网段配置需要跨网段访问时，删除 `network` 一项。升级前若已有服务占用扫码页端口，先释放端口或改用其他端口。请勿将这个端口转发到公网。
 3. 首次部署执行 `docker compose up -d --build`。升级现有部署时，可以先构建桥接，准备好扫码后再替换它：
 
    ```bash
@@ -92,7 +91,7 @@ docker compose exec -T bridge node bridge/admin.mjs id
    docker compose up -d --no-deps --no-build --force-recreate bridge
    ```
 
-在同一内网打开配置的地址，点击 **获取登录二维码**，用微信测试账号扫码并在手机上确认。
+在可达的内网打开配置的地址，点击 **获取登录二维码**，用微信测试账号扫码并在手机上确认。取码请求必须来自同一网页地址。
 
 - **已在线**：网页显示在线，重复点击或刷新不会发起新登录。
 - **微信掉线**：桥接结束当前微信会话，网页继续运行。方便扫码时再点击按钮取新码。
