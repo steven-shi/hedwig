@@ -1,0 +1,191 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 7e8c251..0a8dbd8 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -131,3 +131,7 @@ features = ["derive"]
+
+ [build-dependencies.cc]
+ version = "1"
++
++[[example]]
++name = "moments_trial"
++path = "examples/moments_trial.rs"
+diff --git a/src/account.rs b/src/account.rs
+index 1e30863..6747925 100644
+--- a/src/account.rs
++++ b/src/account.rs
+@@ -750,6 +750,7 @@ pub use push::AccountPushConnection;
+
+ #[path = "account_operations.rs"]
+ mod operations;
++pub use operations::MomentsTrialReceipt;
+
+ async fn wait_for_poll<R, C, S>(reply: R, cancellation: C, stopped: S) -> Result<Vec<u8>>
+ where
+diff --git a/src/account_operations.rs b/src/account_operations.rs
+index 5069466..df3a4ca 100644
+--- a/src/account_operations.rs
++++ b/src/account_operations.rs
+@@ -1,5 +1,6 @@
+ //! Account-owned asynchronous protocol operations.
+ use super::*;
++use crate::DeviceProfile;
+
+ impl NativeClient {
+     /// Fetch one sync page using the owned account. The application still owns
+@@ -550,3 +551,143 @@ impl NativeClient {
+         .await
+     }
+ }
++
++/// Result of one isolated, text-only Moments experiment.
++pub enum MomentsTrialReceipt {
++    Accepted(u64),
++    Rejected(i32),
++}
++
++fn moments_text_request(
++    profile: &DeviceProfile,
++    uin: u32,
++    author: &str,
++    text: &str,
++    created_at: u32,
++    client_id: &str,
++) -> Result<Vec<u8>> {
++    use crate::protobuf as p;
++    anyhow::ensure!(
++        !text.trim().is_empty() && text.len() <= 4000,
++        "Invalid experiment text"
++    );
++    anyhow::ensure!(
++        !author.is_empty() && !author.chars().any(char::is_control),
++        "Invalid author"
++    );
++    anyhow::ensure!(
++        client_id.len() == 32 && client_id.bytes().all(|b| b.is_ascii_hexdigit()),
++        "Invalid attempt ID"
++    );
++    fn xml_text(value: &str) -> String {
++        let mut escaped = String::new();
++        for ch in value.chars() {
++            match ch {
++                '&' => escaped.push_str("&amp;"),
++                '<' => escaped.push_str("&lt;"),
++                '>' => escaped.push_str("&gt;"),
++                '"' => escaped.push_str("&quot;"),
++                '\'' => escaped.push_str("&apos;"),
++                ch => escaped.push(ch),
++            }
++        }
++        escaped
++    }
++    let author = xml_text(author);
++    let text = xml_text(text);
++    let xml = format!(
++        "<TimelineObject><id>0</id><username>{author}</username>\
++         <createTime>{created_at}</createTime><contentDesc>{text}</contentDesc>\
++         <private>1</private><ContentObject><contentStyle>2</contentStyle>\
++         <contentSubStyle>0</contentSubStyle></ContentObject></TimelineObject>"
++    );
++    p::message(&[
++        p::bytes(1, &crate::wire::base_request(profile, uin, 0)?),
++        p::bytes(2, &p::buffer(xml.as_bytes())),
++        p::uint(3, 0),
++        p::uint(5, 1),
++        p::uint(6, 0),
++        p::bytes(7, client_id.as_bytes()),
++    ])
++}
++
++fn decode_moments_trial_receipt(reply: &[u8]) -> Result<MomentsTrialReceipt> {
++    use crate::protobuf as p;
++    let fields = p::decode(reply)?;
++    let code = p::base_code(&fields)?;
++    if code != 0 {
++        return Ok(MomentsTrialReceipt::Rejected(code));
++    }
++    let object = p::decode(p::data(&fields, 2)?)?;
++    let id = p::scalar(&object, 1)?;
++    anyhow::ensure!(id != 0, "Missing nonzero post ID");
++    Ok(MomentsTrialReceipt::Accepted(id))
++}
++
++impl NativeClient {
++    /// Submit one private text post through an already authorized trial account.
++    /// The transport makes one submission and this caller never retries it.
++    pub async fn submit_moments_trial(
++        &self,
++        text: String,
++        created_at: u32,
++        client_id: String,
++    ) -> Result<MomentsTrialReceipt> {
++        self.account_request(move |transport, state, _| {
++            let request = moments_text_request(
++                &state.device,
++                state.uin,
++                &state.own_username,
++                &text,
++                created_at,
++                &client_id,
++            )?;
++            let reply = transport.authenticated_rpc(
++                state,
++                209,
++                "/cgi-bin/micromsg-bin/mmsnspost",
++                &request,
++            )?;
++            decode_moments_trial_receipt(&reply)
++        })
++        .await
++    }
++}
++
++#[cfg(test)]
++mod moments_trial_tests {
++    use super::*;
++    use crate::protobuf as p;
++
++    #[test]
++    fn encodes_private_moments_as_xml_and_protobuf() -> Result<()> {
++        let device = DeviceProfile::generate("UnifiedPCLinux fixture".into())?;
++        let request = moments_text_request(
++            &device,
++            0,
++            "synthetic-user",
++            "<文字 & 符号>",
++            1700000000,
++            "0123456789abcdef0123456789abcdef",
++        )?;
++        let entries = p::decode(&request)?;
++        assert!(!p::data(&entries, 1)?.is_empty());
++        assert_eq!(p::scalar(&entries, 5)?, 1);
++        let xml = String::from_utf8(p::unbuffer(p::data(&entries, 2)?)?)?;
++        assert!(xml.contains("<contentDesc>&lt;文字 &amp; 符号&gt;</contentDesc>"));
++        assert!(xml.contains("<private>1</private>"));
++        assert!(xml.contains("<contentStyle>2</contentStyle>"));
++        assert!(!xml.contains("mediaList"));
++        Ok(())
++    }
++
++    #[test]
++    fn distinguishes_accepted_rejected_and_unknown() -> Result<()> {
++        let accepted = p::message(&[p::bytes(1, &p::int32(1, 0)), p::bytes(2, &p::uint(1, 42))])?;
++        assert!(matches!(decode_moments_trial_receipt(&accepted)?, MomentsTrialReceipt::Accepted(42)));
++        let rejected = p::bytes(1, &p::int32(1, -1));
++        assert!(matches!(decode_moments_trial_receipt(&rejected)?, MomentsTrialReceipt::Rejected(-1)));
++        assert!(decode_moments_trial_receipt(&p::bytes(1, &p::int32(1, 0))).is_err());
++        Ok(())
++    }
++}
+diff --git a/src/client.rs b/src/client.rs
+index c58d06f..5e6f522 100644
+--- a/src/client.rs
++++ b/src/client.rs
+@@ -9,6 +9,7 @@ mod group_inventory;
+ pub use group_inventory::*;
+ #[path = "account.rs"]
+ mod account;
++pub use account::MomentsTrialReceipt;
+ #[path = "logout.rs"]
+ mod logout;
+ #[path = "revoke.rs"]
